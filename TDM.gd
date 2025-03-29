@@ -1,135 +1,127 @@
-extends GameModeAPI.GameMode
 class_name TeamDeathmatchMode
+extends GameModeAPI.GameMode
 
-## === Конфигурация режима === ##
+## Настройки режима ##
+var score_to_win: int = 50
+var respawn_time: float = 3.0
+var team_colors: Dictionary = {
+    "red": Color(0.8, 0.2, 0.2),
+    "blue": Color(0.2, 0.2, 0.8)
+}
+
 func _init():
     name = "Team Deathmatch"
-    description = "Классический командный бой до достижения лимита очков"
-    author = "CSLike Game"
-    version = "1.2"
-    max_players = 16
+    description = "Командный бой до достижения лимита убийств"
     team_based = true
-    required_weapons = ["rifle", "pistol", "knife"]
-    
-    # Модификаторы оружия для баланса
-    weapon_modifiers.damage_mult = 1.0
-    weapon_modifiers.fire_rate_mult = 1.0
-    weapon_modifiers.reload_speed_mult = 0.9  # +10% скорости перезарядки
+    default_teams = [
+        {"name": "red", "color": team_colors.red},
+        {"name": "blue", "color": team_colors.blue}
+    ]
+    scoreboard_stats = ["kills", "deaths", "score", "kd", "ping"]
+    default_lives = -1 # Бесконечные жизни (используем respawn)
+    allow_damage = true
 
-## === Переменные режима === ##
-var team_scores = {"red": 0, "blue": 0}
-var score_limit = 100
-var spawn_points = {
-    "red": [],
-    "blue": []
-}
-var player_respawns = {}  # player_id: respawn_time
-
-## === Основные методы === ##
+## Переопределенные методы ##
 func setup(api: GameModeAPI) -> void:
-    # Загружаем точки спавна с текущей карты
-    _load_spawn_points()
+    super.setup(api)
     
-    # Настройка игроков при подключении
-    api.player_joined.connect(_on_player_joined)
-    api.player_left.connect(_on_player_left)
-    api.score_updated.connect(_on_score_updated)
+    # Дополнительные настройки для TDM
+    api.set_timer_visible(true)
+    api.set_custom_stats(scoreboard_stats)
     
-    print("TDM mode initialized!")
+    # Устанавливаем кастомный текст для команд (можно менять динамически)
+    for team_name in team_colors:
+        api.set_team_custom_text(team_name, "0 kills")
 
-func start() -> void:
-    # Разделяем игроков на команды
-    _assign_teams()
+func get_team_color(team_name: String) -> Color:
+    return team_colors.get(team_name, Color.WHITE)
+
+func get_scoreboard_data(player_stats: Dictionary) -> Dictionary:
+    var data = super.get_scoreboard_data(player_stats)
     
-    # Телепортируем всех на точки спавна
-    for player_id in api.player_data:
-        spawn_player(player_id)
+    # Добавляем KD ratio для каждого игрока
+    for player_id in data:
+        var kills = player_stats[player_id].get("kills", 0)
+        var deaths = player_stats[player_id].get("deaths", 1) # Чтобы избежать деления на 0
+        data[player_id]["kd"] = "%.2f" % (float(kills) / float(deaths))
     
-    api.mode_state = api.ModeState.INGAME
-    print("TDM started! First team to reach %d points wins!" % score_limit)
+    return data
 
-func end() -> void:
-    # Определяем победителя
-    var winner = "Draw"
-    if team_scores["red"] > team_scores["blue"]:
-        winner = "Red Team"
-    elif team_scores["blue"] > team_scores["red"]:
-        winner = "Blue Team"
-    
-    print("Game over! Winner: %s (Red: %d, Blue: %d)" % [
-        winner, team_scores["red"], team_scores["blue"]
-    ])
-    
-    api.mode_state = api.ModeState.POSTGAME
-    get_tree().create_timer(10.0).timeout.connect(_restart_round)
-
-## === Обработчики событий === ##
-func _on_player_joined(player_id: String) -> void:
-    _assign_team(player_id)
-    if api.mode_state == api.ModeState.INGAME:
-        spawn_player(player_id)
-
-func _on_player_left(player_id: String) -> void:
-    player_respawns.erase(player_id)
-
-func on_player_death(player_id: String, killer_id: String) -> void:
-    if killer_id in api.player_data:
-        var killer_team = api.player_data[killer_id].team
-        var victim_team = api.player_data[player_id].team
-        
-        if killer_team != victim_team:
-            api.update_score(killer_id, 1)
-            team_scores[killer_team] += 1
-            print("%s (%s) killed %s (%s)! %s: %d" % [
-                killer_id, killer_team,
-                player_id, victim_team,
-                killer_team, team_scores[killer_team]
-            )
-    
-    player_respawns[player_id] = Time.get_ticks_msec() + 5000
-
-func on_player_spawn(player_id: String) -> void:
-    api._setup_player_weapons(player_id)
-    var team = api.player_data[player_id].team
-    var spawn = _get_random_spawn(team)
-    api.teleport_to(player_id, spawn)
-
-func _on_score_updated(player_id: String, delta: int) -> void:
-    for team in team_scores:
-        if team_scores[team] >= score_limit:
-            end()
-            break
-
-## === Вспомогательные методы === ##
-func _load_spawn_points() -> void:
-    spawn_points["red"] = [Vector3(10, 0, 5), Vector3(12, 0, 3)]
-    spawn_points["blue"] = [Vector3(-10, 0, 5), Vector3(-12, 0, 3)]
-
-func _assign_teams() -> void:
-    var players = api.player_data.keys()
-    for i in range(players.size()):
-        _assign_team(players[i])
-
-func _assign_team(player_id: String) -> void:
-    var red_count = 0
-    var blue_count = 0
+## Методы обработки событий (будут вызываться API) ##
+func on_player_join(api: GameModeAPI, player_id: String) -> void:
+    # Распределяем игроков по командам равномерно
+    var team_count = {"red": 0, "blue": 0}
     
     for pid in api.player_data:
-        if api.player_data[pid].team == "red":
-            red_count += 1
-        elif api.player_data[pid].team == "blue":
-            blue_count += 1
+        var team = api.player_data[pid].team
+        if team in team_count:
+            team_count[team] += 1
     
-    var team = "red" if red_count <= blue_count else "blue"
-    api.set_player_team(player_id, team)
-    print("%s assigned to %s team" % [player_id, team])
+    # Выбираем команду с меньшим количеством игроков
+    var target_team = "red" if team_count.red <= team_count.blue else "blue"
+    api.set_player_team(player_id, target_team)
+    
+    # Инициализируем статистику
+    api.update_player_stat(player_id, "kills", 0)
+    api.update_player_stat(player_id, "deaths", 0)
+    api.update_player_stat(player_id, "score", 0)
 
-func _get_random_spawn(team: String) -> Vector3:
-    if spawn_points[team].size() == 0:
-        return Vector3.ZERO
-    return spawn_points[team][randi() % spawn_points[team].size()]
+func on_player_death(api: GameModeAPI, player_id: String, killer_id: String) -> void:
+    if killer_id != "" and killer_id != player_id: # Не самоубийство
+        # Обновляем статистику убийцы
+        var killer_stats = api.player_data[killer_id].stats
+        var new_kills = killer_stats.get("kills", 0) + 1
+        api.update_player_stat(killer_id, "kills", new_kills)
+        api.update_player_stat(killer_id, "score", new_kills * 10)
+        
+        # Обновляем счет команды убийцы
+        var killer_team = api.player_data[killer_id].team
+        if api.teams.has(killer_team):
+            api.teams[killer_team].score = new_kills
+            api.set_team_custom_text(killer_team, "%d kills" % new_kills)
+    
+    # Обновляем статистику умершего
+    var deaths = api.player_data[player_id].stats.get("deaths", 0) + 1
+    api.update_player_stat(player_id, "deaths", deaths)
+    
+    # Проверяем условия победы
+    check_win_condition(api)
 
-func _restart_round() -> void:
-    team_scores = {"red": 0, "blue": 0}
-    api.mode_state = api.ModeState.LOBBY
-    start()
+func on_player_respawn(api: GameModeAPI, player_id: String) -> void:
+    # Можно добавить эффекты при возрождении
+    pass
+
+## Внутренние методы ##
+func check_win_condition(api: GameModeAPI) -> void:
+    var scores = {}
+    for team_name in api.teams:
+        scores[team_name] = api.teams[team_name].score
+    
+    # Проверяем, достиг ли кто-то лимита
+    for team_name in scores:
+        if scores[team_name] >= score_to_win:
+            end_match(api, team_name)
+            return
+
+func end_match(api: GameModeAPI, winning_team: String) -> void:
+    # Устанавливаем состояние пост-игры
+    api.mode_state = 3 # POSTGAME
+    
+    # Можно добавить анонс победителя и другие действия
+    print("Team %s wins with %d kills!" % [winning_team, api.teams[winning_team].score])
+    
+    # Запланировать возвращение в лобби через 10 секунд
+    await api.get_tree().create_timer(10.0).timeout
+    api.mode_state = 0 # LOBBY
+    reset_match(api)
+
+func reset_match(api: GameModeAPI) -> void:
+    # Сбрасываем статистику для новой игры
+    for team_name in api.teams:
+        api.teams[team_name].score = 0
+        api.set_team_custom_text(team_name, "0 kills")
+    
+    for player_id in api.player_data:
+        api.update_player_stat(player_id, "kills", 0)
+        api.update_player_stat(player_id, "deaths", 0)
+        api.update_player_stat(player_id, "score", 0)
