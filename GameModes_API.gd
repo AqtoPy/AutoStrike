@@ -2,89 +2,76 @@ class_name GameModeAPI
 extends Node
 
 ## === Сигналы === ##
-signal mode_loaded(mode_name)                # Режим загружен
-signal mode_unloaded(mode_name)              # Режим выгружен
-signal player_joined(player_id, mode_data)   # Игрок присоединился
-signal player_left(player_id)                # Игрок вышел
-signal weapon_modified(weapon_slot)          # Оружие модифицировано
-signal score_updated(player_id, new_score)   # Обновлены очки
-signal team_updated(player_id, new_team)     # Изменена команда
-
-## === Константы === ##
-enum ModeState {
-    LOBBY,          # Ожидание игроков
-    PREGAME,        # Подготовка
-    INGAME,         # Идет игра
-    POSTGAME        # Завершение
-}
+signal mode_loaded(mode_name)
+signal mode_unloaded(mode_name)
+signal player_joined(player_id, team)
+signal player_left(player_id)
+signal team_updated(team_name, property, value)
 
 ## === Классы данных === ##
-class WeaponModifiers:
-    var damage_mult: float = 1.0
-    var fire_rate_mult: float = 1.0
-    var reload_speed_mult: float = 1.0
-    var ammo_mult: float = 1.0
-    var spread_mult: float = 1.0
+class TeamData:
+    var name: String
+    var color: Color
+    var score: int = 0
+    var players: Array = []
     
-    func apply_to(weapon_slot: WeaponSlot) -> void:
-        var w = weapon_slot.weapon
-        w.damage *= damage_mult
-        w.fire_rate *= fire_rate_mult
-        w.reload_time *= reload_speed_mult
-        w.magazine = ceil(w.magazine * ammo_mult)
-        w.max_ammo = ceil(w.max_ammo * ammo_mult)
-        w.spread *= spread_mult
+    func _init(_name: String, _color: Color):
+        name = _name
+        color = _color
 
 class PlayerModeData:
-    var team: String = "neutral"
-    var role: String = "player"
-    var score: int = 0
-    var kills: int = 0
-    var deaths: int = 0
-    var custom_data: Dictionary = {}
+    var team: String = ""
+    var stats: Dictionary = {}
+    var is_vip: bool = false
+    
+    func update_stat(stat_name: String, value):
+        stats[stat_name] = value
 
-## === Переменные API === ##
+## === Основные переменные === ##
 var current_mode: GameMode = null
 var available_modes: Dictionary = {}
-var player_data: Dictionary = {}       # player_id: PlayerModeData
-var mode_state: ModeState = ModeState.LOBBY
-var weapon_modifiers: WeaponModifiers = WeaponModifiers.new()
+var teams: Dictionary = {}       # team_name: TeamData
+var player_data: Dictionary = {} # player_id: PlayerModeData
+var mode_state: int = 0 # 0-lobby, 1-pregame, 2-ingame, 3-postgame
 
 ## === Базовый класс режима === ##
 class GameMode:
     var name: String = "Unnamed"
     var description: String = ""
-    var author: String = "Unknown"
-    var version: String = "1.0"
-    var max_players: int = 16
-    var required_weapons: Array = []    # ["pistol", "rifle"]
-    var default_weapons: Array = []     # Альтернатива required_weapons
-    var supported_maps: Array = []
     var team_based: bool = false
-    var weapon_modifiers: WeaponModifiers = WeaponModifiers.new()
+    var default_teams: Array = [
+        {"name": "red", "color": Color.RED},
+        {"name": "blue", "color": Color.BLUE}
+    ]
+    var scoreboard_stats: Array = ["kills", "deaths", "score", "ping"]
     
-    # Виртуальные методы
-    func setup(api: GameModeAPI) -> void: pass
-    func cleanup() -> void: pass
-    func start() -> void: pass
-    func end() -> void: pass
+    func setup(api: GameModeAPI) -> void:
+        # Инициализация команд
+        if team_based:
+            for team in default_teams:
+                api.create_team(team.name, team.color)
     
-    func on_player_join(player_id: String) -> void: pass
-    func on_player_leave(player_id: String) -> void: pass
-    func on_player_spawn(player_id: String) -> void: pass
-    func on_player_death(player_id: String, killer_id: String) -> void: pass
-    func on_weapon_fire(player_id: String, weapon_slot: WeaponSlot) -> void: pass
-    func on_weapon_reload(player_id: String, weapon_slot: WeaponSlot) -> void: pass
-    func on_score_update(player_id: String, delta: int) -> void: pass
+    func get_team_color(team_name: String) -> Color:
+        return Color.WHITE
+    
+    func get_scoreboard_data(player_stats: Dictionary) -> Dictionary:
+        var data = {}
+        for player_id in player_stats:
+            data[player_id] = {
+                "name": player_stats[player_id].get("name", "Player"),
+                "team": player_stats[player_id].get("team", ""),
+                "is_vip": player_stats[player_id].get("is_vip", false)
+            }
+            for stat in scoreboard_stats:
+                if player_stats[player_id].has(stat):
+                    data[player_id][stat] = player_stats[player_id][stat]
+        return data
 
 ## === Основной API === ##
-
-# Инициализация
 func _ready():
     _load_builtin_modes()
     _scan_custom_modes()
 
-# Регистрация режимов
 func register_mode(mode_script: GDScript) -> bool:
     var mode = mode_script.new()
     if not mode is GameMode:
@@ -95,16 +82,6 @@ func register_mode(mode_script: GDScript) -> bool:
     mode_loaded.emit(mode.name)
     return true
 
-func unregister_mode(mode_name: String) -> bool:
-    if mode_name in available_modes:
-        if current_mode and current_mode.name == mode_name:
-            unload_current_mode()
-        available_modes.erase(mode_name)
-        mode_unloaded.emit(mode_name)
-        return true
-    return false
-
-# Управление текущим режимом
 func load_mode(mode_name: String) -> bool:
     if mode_name in available_modes:
         if current_mode:
@@ -112,104 +89,98 @@ func load_mode(mode_name: String) -> bool:
         
         current_mode = available_modes[mode_name]
         current_mode.setup(self)
-        mode_state = ModeState.LOBBY
+        mode_state = 0 # LOBBY
         return true
     return false
 
-func unload_current_mode() -> void:
-    if current_mode:
-        current_mode.cleanup()
-        current_mode = null
-    mode_state = ModeState.LOBBY
+func create_team(team_name: String, team_color: Color) -> void:
+    if not teams.has(team_name):
+        teams[team_name] = TeamData.new(team_name, team_color)
+        team_updated.emit(team_name, "created", null)
 
-func start_mode() -> void:
-    if current_mode and mode_state == ModeState.LOBBY:
-        current_mode.start()
-        mode_state = ModeState.INGAME
+func remove_team(team_name: String) -> void:
+    if teams.has(team_name):
+        for player_id in teams[team_name].players:
+            set_player_team(player_id, "")
+        teams.erase(team_name)
+        team_updated.emit(team_name, "removed", null)
 
-func end_mode() -> void:
-    if current_mode and mode_state == ModeState.INGAME:
-        current_mode.end()
-        mode_state = ModeState.POSTGAME
+func set_player_team(player_id: String, team_name: String) -> void:
+    if not player_data.has(player_id):
+        return
+    
+    # Удаляем из старой команды
+    var old_team = player_data[player_id].team
+    if teams.has(old_team):
+        teams[old_team].players.erase(player_id)
+    
+    # Добавляем в новую команду
+    if teams.has(team_name):
+        player_data[player_id].team = team_name
+        teams[team_name].players.append(player_id)
+        player_joined.emit(player_id, team_name)
+    else:
+        player_data[player_id].team = ""
 
-# Управление игроками
-func add_player(player_id: String) -> void:
-    if not player_id in player_data:
-        player_data[player_id] = PlayerModeData.new()
+func update_player_stat(player_id: String, stat_name: String, value) -> void:
+    if player_data.has(player_id):
+        player_data[player_id].update_stat(stat_name, value)
         
-        if current_mode:
-            current_mode.on_player_join(player_id)
-            player_joined.emit(player_id, player_data[player_id])
+        # Обновляем статистику команды если нужно
+        if stat_name == "score" and player_data[player_id].team:
+            var team = player_data[player_id].team
+            if teams.has(team):
+                teams[team].score = _calculate_team_score(team)
 
-func remove_player(player_id: String) -> void:
-    if player_id in player_data:
-        if current_mode:
-            current_mode.on_player_leave(player_id)
-        player_data.erase(player_id)
-        player_left.emit(player_id)
+func get_scoreboard_data() -> Dictionary:
+    if current_mode:
+        var stats = {}
+        for player_id in player_data:
+            stats[player_id] = {
+                "name": player_data[player_id].get("name", "Player"),
+                "team": player_data[player_id].team,
+                "is_vip": player_data[player_id].is_vip
+            }
+            for stat in current_mode.scoreboard_stats:
+                if player_data[player_id].stats.has(stat):
+                    stats[player_id][stat] = player_data[player_id].stats[stat]
+        
+        return current_mode.get_scoreboard_data(stats)
+    return {}
 
-func spawn_player(player_id: String) -> void:
-    if player_id in player_data and current_mode:
-        current_mode.on_player_spawn(player_id)
-        _setup_player_weapons(player_id)
+func get_team_color(team_name: String) -> Color:
+    if teams.has(team_name):
+        return teams[team_name].color
+    return current_mode.get_team_color(team_name) if current_mode else Color.WHITE
 
-func _setup_player_weapons(player_id: String) -> void:
-    # Здесь должна быть интеграция с вашим WeaponSystem
-    # Примерный псевдокод:
-    var weapon_system = get_player_weapon_system(player_id)
-    if weapon_system:
-        if current_mode.required_weapons.size() > 0:
-            weapon_system.reset_weapons()
-            for weapon_name in current_mode.required_weapons:
-                var weapon_slot = _create_weapon_slot(weapon_name)
-                weapon_system.add_weapon(weapon_slot)
-        current_mode.weapon_modifiers.apply_to_weapons(weapon_system)
+## === Внутренние методы === ##
+func _calculate_team_score(team_name: String) -> int:
+    var total = 0
+    for player_id in teams[team_name].players:
+        if player_data[player_id].stats.has("score"):
+            total += player_data[player_id].stats["score"]
+    return total
 
-# Работа с оружием (интеграция с WeaponSystem)
-func on_weapon_fired(player_id: String, weapon_slot: WeaponSlot) -> void:
-    if current_mode and player_id in player_data:
-        current_mode.on_weapon_fire(player_id, weapon_slot)
-
-func on_weapon_reloaded(player_id: String, weapon_slot: WeaponSlot) -> void:
-    if current_mode and player_id in player_data:
-        current_mode.on_weapon_reload(player_id, weapon_slot)
-
-# Система команд/очков
-func update_score(player_id: String, delta: int) -> void:
-    if player_id in player_data:
-        player_data[player_id].score += delta
-        if current_mode:
-            current_mode.on_score_update(player_id, delta)
-        score_updated.emit(player_id, player_data[player_id].score)
-
-func set_player_team(player_id: String, team: String) -> void:
-    if player_id in player_data:
-        player_data[player_id].team = team
-        team_updated.emit(player_id, team)
-
-# Внутренние методы
-func _load_builtin_modes() -> void:
+func _load_builtin_modes():
     var builtin_modes = [
         load("res://game_modes/DeathmatchMode.gd"),
-        load("res://game_modes/TeamDeathmatchMode.gd"),
-        load("res://game_modes/ZombieMode.gd")
+        load("res://game_modes/TeamDeathmatchMode.gd")
     ]
-    
     for mode_script in builtin_modes:
         if mode_script:
             register_mode(mode_script)
 
-func _scan_custom_modes() -> void:
-    var custom_dir = DirAccess.open("user://game_modes/")
-    if not custom_dir:
+func _scan_custom_modes():
+    var dir = DirAccess.open("user://game_modes/")
+    if not dir:
         DirAccess.make_dir_recursive_absolute("user://game_modes/")
         return
     
-    custom_dir.list_dir_begin()
-    var file = custom_dir.get_next()
+    dir.list_dir_begin()
+    var file = dir.get_next()
     while file != "":
         if file.ends_with(".gd"):
             var script = load("user://game_modes/" + file)
             if script:
                 register_mode(script)
-        file = custom_dir.get_next()
+        file = dir.get_next()
