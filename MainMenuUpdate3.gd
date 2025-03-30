@@ -84,6 +84,68 @@ func _create_network_server():
     
     status_label.text = "Local server '%s' created!" % current_server_info["name"]
     status_label.modulate = Color.GREEN
+
+
+
+func _on_server_list_updated(servers: Array) -> void:
+    # Очищаем текущий список серверов
+    for child in server_list.get_children():
+        child.queue_free()
+    
+    # Добавляем локальные серверы с проверкой типа
+    var local_servers: Array = discover_local_servers()
+    if local_servers is Array:
+        servers.append_array(local_servers)
+    else:
+        push_error("Local servers should be Array, got ", typeof(local_servers))
+    
+    # Обрабатываем каждый сервер
+    for server in servers:
+        # Проверяем тип данных сервера
+        if not server is Dictionary:
+            push_error("Invalid server type: ", typeof(server), " value: ", server)
+            continue
+            
+        # Проверяем обязательные поля
+        if not server.has_all(["name", "map", "ip", "port"]):
+            push_error("Server missing required fields: ", server)
+            continue
+            
+        # Создаем кнопку сервера
+        var server_button := Button.new()
+        server_button.name = "ServerButton_%s" % server["name"]
+        server_button.text = _format_server_info(server)
+        server_button.custom_minimum_size = Vector2(0, 60)
+        server_button.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+        
+        # Стилизация VIP серверов
+        if server.get("is_vip", false):
+            var vip_style := StyleBoxFlat.new()
+            vip_style.bg_color = Color(0.2, 0.1, 0.3)
+            vip_style.border_color = Color.GOLD
+            vip_style.border_width_left = 4
+            vip_style.border_width_right = 4
+            vip_style.border_width_top = 4
+            vip_style.border_width_bottom = 4
+            
+            server_button.add_theme_stylebox_override("normal", vip_style)
+            server_button.add_theme_stylebox_override("hover", vip_style)
+            server_button.add_theme_color_override("font_color", Color.GOLD)
+        
+        # Подключаем сигнал с проверкой данных
+        if server.has("ip") and server.has("port"):
+            server_button.pressed.connect(
+                _on_server_selected.bind(server), 
+                CONNECT_DEFERRED
+            )
+        else:
+            push_error("Server missing connection info: ", server)
+            
+        server_list.add_child(server_button)
+
+    # Обновляем статус
+    status_label.text = "Found %d servers" % servers.size()
+    status_label.modulate = Color.WHITE
     
     # Автоматически подключаем создателя к серверу
     _start_game()
