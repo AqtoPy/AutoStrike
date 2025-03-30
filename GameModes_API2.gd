@@ -137,3 +137,15 @@ func setup_capture_zones():
     add_shop_item("Shop", "Health", 50, func(player_id): 
         update_player_stat(player_id, "health", 25)
     )
+# Добавляем в GameModeAPI
+signal shop_item_purchased(player_id: String, item_id: String)
+signal shop_tab_added(tab_name: String, items: Dictionary)
+
+var shop_tabs = {}
+
+func register_shop_tab(tab_name: String, items: Dictionary):
+    shop_tabs[tab_name] = items
+    shop_tab_added.emit(tab_name, items)
+
+func purchase_item(player_id: String, item_id: String):
+    shop_item_purchased.emit(player_id, item_id)
