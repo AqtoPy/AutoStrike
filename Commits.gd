@@ -40,3 +40,40 @@ func _on_create_server_pressed():
     }
     
     server_created.emit([server_info])  # Обязательно массив!
+
+func _create_network_server():
+    # Закрываем предыдущее подключение, если было
+    if multiplayer.has_multiplayer_peer():
+        multiplayer.multiplayer_peer.close()
+    
+    # Создаем новый peer
+    var peer = ENetMultiplayerPeer.new()
+    
+    # Пробуем разные порты по очереди
+    var ports_to_try = [9050, 9051, 9055, 9070, 9080]
+    var success = false
+    
+    for port in ports_to_try:
+        print("Пробуем порт:", port)
+        var error = peer.create_server(port)
+        if error == OK:
+            print("Успешно создан сервер на порту:", port)
+            current_server_info["port"] = port
+            success = true
+            break
+        else:
+            print("Ошибка создания сервера (код %d)" % error)
+    
+    if not success:
+        printerr("Не удалось создать сервер ни на одном из портов!")
+        return
+    
+    # Настройка подключения
+    multiplayer.multiplayer_peer = peer
+    
+    # Сигналы подключения
+    multiplayer.peer_connected.connect(_on_player_connected)
+    multiplayer.peer_disconnected.connect(_on_player_disconnected)
+    
+    print("Сервер успешно запущен!")
+    _start_game()
