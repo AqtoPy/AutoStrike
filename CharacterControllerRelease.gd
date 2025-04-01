@@ -3,15 +3,14 @@ class_name CSLikePlayerController
 
 ## === Настройки движения === ##
 @export_category("Movement Settings")
-@export var walk_speed: float = 250.0
-@export var run_speed: float = 300.0
-@export var crouch_speed: float = 150.0
-@export var jump_velocity: float = 8.0
-@export var air_accelerate: float = 10.0
-@export var ground_accelerate: float = 10.0
-@export var friction: float = 4.0
-@export var gravity: float = 20.0
-@export var max_air_speed: float = 30.0
+@export var walk_speed: float = 5.0
+@export var run_speed: float = 8.0
+@export var crouch_speed: float = 3.0
+@export var jump_velocity: float = 4.5
+@export var air_accelerate: float = 0.5
+@export var ground_accelerate: float = 2.0
+@export var friction: float = 6.0
+@export var gravity: float = 9.8
 @export var crouch_depth: float = 0.5
 @export var bunnyhop_speed_boost: float = 1.1
 
@@ -22,9 +21,9 @@ class_name CSLikePlayerController
 @export var team: int = 0  # 0 - нет команды, 1 - красные, 2 - синие
 @export var player_name: String = "Player"
 
-## === Настройки мыши === ##
-@export_category("Mouse Settings")
-@export var mouse_sensitivity: float = 0.3
+## === Настройки камеры === ##
+@export_category("Camera Settings")
+@export var mouse_sensitivity: float = 0.1
 @export var max_look_angle: float = 90.0
 @export var min_look_angle: float = -90.0
 
@@ -43,15 +42,14 @@ class_name CSLikePlayerController
 ## === Переменные === ##
 var is_crouching: bool = false
 var is_running: bool = false
-var wish_dir: Vector3 = Vector3.ZERO
+var health: int = max_health
+var is_dead: bool = false
 var player_id: int = 0
 var player_role: String = "player"
 var bunnyhop_enabled: bool = false
-var health: int = max_health
-var is_dead: bool = false
+var sync_timer: float = 0.0
 var target_position: Vector3 = Vector3.ZERO
 var target_rotation: Vector3 = Vector3.ZERO
-var sync_timer: float = 0.0
 const SYNC_INTERVAL: float = 0.1
 
 ## === Сигналы === ##
@@ -62,117 +60,108 @@ signal role_changed(new_role: String)
 signal team_changed(new_team: int)
 
 func _ready():
-    # Инициализация сети
+    initialize_network()
+    setup_player()
+    Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func initialize_network():
     if multiplayer.has_multiplayer_peer():
         player_id = multiplayer.get_unique_id()
         set_multiplayer_authority(player_id)
-        
-        if is_multiplayer_authority():
-            _setup_local_player()
-        else:
-            _setup_remote_player()
-    
-    _initialize_player()
-    update_visuals()
+        multiplayer.peer_connected.connect(_on_peer_connected)
+        multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 
-func _setup_local_player():
+func setup_player():
+    if is_multiplayer_authority():
+        setup_local_player()
+    else:
+        setup_remote_player()
+    
+    name_label.text = player_name
+    respawn_timer.timeout.connect(_on_respawn_timer_timeout)
+    hitbox.body_entered.connect(_on_hitbox_body_entered)
+    _check_player_role()
+
+func setup_local_player():
     camera.current = true
-    Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-    name_label.visible = false
     first_person_model.visible = true
     model.visible = false
+    name_label.visible = false
 
-func _setup_remote_player():
+func setup_remote_player():
     camera.current = false
     first_person_model.visible = false
     model.visible = true
 
-func _initialize_player():
-    respawn_timer.timeout.connect(_on_respawn_timer_timeout)
-    hitbox.body_entered.connect(_on_hitbox_body_entered)
-    name_label.text = player_name
-
 func _physics_process(delta):
-    if is_dead:
-        return
+    if is_dead: return
     
     if is_multiplayer_authority():
-        _handle_movement(delta)
-        _handle_jump()
-        _handle_crouch()
+        handle_movement(delta)
+        handle_jump()
+        handle_crouch()
         move_and_slide()
-        
-        _sync_player_state(delta)
+        update_network_state(delta)
     else:
-        _interpolate_player_state(delta)
+        interpolate_state(delta)
 
-func _handle_movement(delta: float):
+func handle_movement(delta):
     var input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_backward")
     var direction = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
     
-    wish_dir = Vector3(direction.x, 0, direction.z)
-    
-    var target_speed = walk_speed
-    if is_running and not is_crouching:
-        target_speed = run_speed
-    elif is_crouching:
-        target_speed = crouch_speed
+    var target_speed = run_speed if is_running else walk_speed
+    target_speed = crouch_speed if is_crouching else target_speed
     
     if is_on_floor():
-        _accelerate(delta, target_speed, ground_accelerate)
-        _apply_friction(delta)
+        velocity.x = lerp(velocity.x, direction.x * target_speed, ground_accelerate * delta)
+        velocity.z = lerp(velocity.z, direction.z * target_speed, ground_accelerate * delta)
     else:
-        _accelerate(delta, max_air_speed, air_accelerate)
-        velocity.y -= gravity * delta
-
-func _accelerate(delta: float, target_speed: float, accel: float):
-    var current_speed = velocity.dot(wish_dir)
-    var add_speed = target_speed - current_speed
+        velocity.x = lerp(velocity.x, direction.x * target_speed, air_accelerate * delta)
+        velocity.z = lerp(velocity.z, direction.z * target_speed, air_accelerate * delta)
     
-    if add_speed > 0:
-        var accel_speed = accel * target_speed * delta
-        velocity.x += accel_speed * wish_dir.x
-        velocity.z += accel_speed * wish_dir.z
+    velocity.y -= gravity * delta
 
-func _apply_friction(delta: float):
-    var speed = velocity.length()
-    if speed > 0.1:
-        var control = max(speed, walk_speed if is_on_floor() else air_accelerate)
-        var new_speed = max(speed - control * friction * delta, 0) / speed
-        velocity *= new_speed
-    else:
-        velocity = Vector3.ZERO
+func handle_jump():
+    if Input.is_action_just_pressed("jump") and is_on_floor():
+        var speed_boost = 1.0
+        if bunnyhop_enabled and Input.is_action_pressed("jump"):
+            var horizontal_speed = Vector3(velocity.x, 0, velocity.z).length()
+            speed_boost = bunnyhop_speed_boost if horizontal_speed > run_speed * 0.8 else 1.0
+        
+        velocity.y = jump_velocity * speed_boost
+        rpc("_play_jump_effect", speed_boost > 1.0)
 
-func _handle_jump():
-    if is_on_floor() and Input.is_action_just_pressed("jump"):
-        velocity.y = jump_velocity * (bunnyhop_speed_boost if bunnyhop_enabled and Input.is_action_pressed("jump") else 1.0)
-        _play_jump_effect.rpc()
+@rpc("call_local", "reliable")
+func _play_jump_effect(is_bunnyhop: bool):
+    # Эффекты прыжка
+    pass
 
-func _handle_crouch():
+func handle_crouch():
     if Input.is_action_just_pressed("crouch") and not is_crouching:
-        _start_crouch()
+        start_crouch()
     elif Input.is_action_just_released("crouch") and is_crouching:
-        _end_crouch()
+        end_crouch()
 
-func _start_crouch():
+func start_crouch():
     is_crouching = true
     standing_collision.disabled = true
     crouching_collision.disabled = false
     camera_pivot.position.y -= crouch_depth
-    _update_crouch_state.rpc(true)
+    rpc("_update_crouch_state", true)
 
-func _end_crouch():
+func end_crouch():
     var space = get_world_3d().direct_space_state
     var query = PhysicsRayQueryParameters3D.create(
         global_position,
         global_position + Vector3.UP * (standing_collision.shape.height + 0.1)
     )
+    
     if not space.intersect_ray(query):
         is_crouching = false
         standing_collision.disabled = false
         crouching_collision.disabled = true
         camera_pivot.position.y += crouch_depth
-        _update_crouch_state.rpc(false)
+        rpc("_update_crouch_state", false)
 
 @rpc("call_local", "reliable")
 func _update_crouch_state(crouching: bool):
@@ -181,50 +170,73 @@ func _update_crouch_state(crouching: bool):
     crouching_collision.disabled = not crouching
     camera_pivot.position.y = 0.0 if not crouching else -crouch_depth
 
-func _sync_player_state(delta: float):
+func update_network_state(delta):
     sync_timer += delta
     if sync_timer >= SYNC_INTERVAL:
         sync_timer = 0
-        _update_player_state.rpc(
+        rpc("_update_player_state", 
             global_position,
             velocity,
-            camera_pivot.rotation,
-            is_on_floor(),
+            Vector2(rotation.y, camera_pivot.rotation.x),
             is_crouching,
-            is_running
-        )
-
-func _interpolate_player_state(delta: float):
-    global_position = global_position.lerp(target_position, 10.0 * delta)
-    rotation.y = lerp_angle(rotation.y, target_rotation.y, 10.0 * delta)
-    camera_pivot.rotation.x = lerp(camera_pivot.rotation.x, target_rotation.x, 10.0 * delta)
+            is_running)
 
 @rpc("any_peer", "reliable")
-func _update_player_state(pos: Vector3, vel: Vector3, cam_rot: Vector3, grounded: bool, crouching: bool, running: bool):
+func _update_player_state(pos: Vector3, vel: Vector3, rot: Vector2, crouching: bool, running: bool):
     if not is_multiplayer_authority():
         target_position = pos
         velocity = vel
-        target_rotation = Vector3(cam_rot.x, rotation.y, rotation.z)
+        target_rotation = Vector3(rot.y, rot.x, 0)
         is_crouching = crouching
         is_running = running
 
-func take_damage(amount: int, attacker_id: int):
-    if is_dead or not is_multiplayer_authority():
-        return
+func interpolate_state(delta):
+    global_position = global_position.lerp(target_position, 10 * delta)
+    rotation.y = lerp_angle(rotation.y, target_rotation.y, 10 * delta)
+    camera_pivot.rotation.x = lerp(camera_pivot.rotation.x, target_rotation.x, 10 * delta)
+
+func _input(event):
+    if not is_multiplayer_authority() or is_dead: return
+    
+    if event is InputEventMouseMotion:
+        rotate_y(-event.relative.x * mouse_sensitivity * 0.01)
+        camera_pivot.rotate_x(-event.relative.y * mouse_sensitivity * 0.01)
+        camera_pivot.rotation.x = clamp(
+            camera_pivot.rotation.x,
+            deg_to_rad(min_look_angle),
+            deg_to_rad(max_look_angle)
+        )
+    
+    if event.is_action_pressed("run"):
+        is_running = true
+    elif event.is_action_released("run"):
+        is_running = false
+    
+    if event.is_action_pressed("shoot"):
+        weapon_system.shoot.rpc_id(1)
+
+func take_damage(amount: int, attacker_id: int, hit_position: Vector3):
+    if is_dead or not is_multiplayer_authority(): return
     
     health -= amount
-    health = max(health, 0)
+    health = clamp(health, 0, max_health)
     health_changed.emit(health)
+    rpc("_play_hit_effect", hit_position)
     
     if health <= 0:
         die.rpc_id(1, attacker_id)
 
 @rpc("call_local", "reliable")
+func _play_hit_effect(position: Vector3):
+    # Эффекты попадания
+    pass
+
+@rpc("call_local", "reliable")
 func die(attacker_id: int):
-    if is_dead:
-        return
+    if is_dead: return
     
     is_dead = true
+    health = 0
     standing_collision.disabled = true
     crouching_collision.disabled = true
     visible = false
@@ -244,8 +256,56 @@ func _on_hitbox_body_entered(body: Node):
     if body.is_in_group("projectile") and is_multiplayer_authority() and not is_dead:
         var projectile = body as Projectile
         if projectile and (projectile.team == 0 or projectile.team != team):
-            take_damage(projectile.damage, projectile.shooter_id)
+            take_damage(projectile.damage, projectile.shooter_id, projectile.global_position)
             body.queue_free()
+
+func _on_respawn_timer_timeout():
+    respawn.rpc_id(1)
+
+func _on_peer_connected(id):
+    print("Player connected: ", id)
+
+func _on_peer_disconnected(id):
+    print("Player disconnected: ", id)
+    if multiplayer.is_server():
+        # Обработка отключения игрока
+        pass
+
+@rpc("call_local", "reliable")
+func set_player_role(role: String):
+    player_role = role
+    bunnyhop_enabled = role in ["vip", "admin", "developer"]
+    role_changed.emit(role)
+    update_visuals()
+
+@rpc("call_local", "reliable")
+func set_team(new_team: int):
+    team = new_team
+    team_changed.emit(new_team)
+    update_visuals()
+
+@rpc("call_local", "reliable")
+func teleport_to(position: Vector3):
+    global_position = position
+    velocity = Vector3.ZERO
+    target_position = position
+
+func _check_player_role():
+    if multiplayer.has_multiplayer_peer():
+        if is_multiplayer_authority():
+            # Запрос роли у сервера
+            rpc_id(1, "_request_player_role", player_id)
+    else:
+        set_player_role("player")
+
+@rpc("any_peer", "reliable")
+func _request_player_role(id: int):
+    if multiplayer.is_server():
+        # Логика назначения роли на сервере
+        var role = "player"
+        if id == 123: role = "admin"
+        elif id == 456: role = "vip"
+        rpc_id(id, "set_player_role", role)
 
 func update_visuals():
     match team:
@@ -254,35 +314,3 @@ func update_visuals():
         _: model.material_override.albedo_color = Color.WHITE
     
     $VIPCrown.visible = player_role in ["vip", "admin", "developer"]
-
-@rpc("call_local", "reliable")
-func set_player_role(role: String):
-    player_role = role
-    bunnyhop_enabled = role in ["vip", "admin", "developer"]
-    update_visuals()
-    role_changed.emit(role)
-
-@rpc("call_local", "reliable")
-func set_team(new_team: int):
-    team = new_team
-    update_visuals()
-    team_changed.emit(new_team)
-
-func _input(event):
-    if is_multiplayer_authority() and not is_dead:
-        if event is InputEventMouseMotion and Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
-            rotate_y(-event.relative.x * mouse_sensitivity * 0.001)
-            camera_pivot.rotate_x(-event.relative.y * mouse_sensitivity * 0.001)
-            camera_pivot.rotation.x = clamp(
-                camera_pivot.rotation.x,
-                deg_to_rad(min_look_angle),
-                deg_to_rad(max_look_angle)
-            )
-        
-        if event.is_action_pressed("run"):
-            is_running = true
-        elif event.is_action_released("run"):
-            is_running = false
-        
-        if event.is_action_pressed("shoot"):
-            weapon_system.shoot.rpc_id(1)
