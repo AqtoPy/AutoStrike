@@ -21,7 +21,7 @@ const SAVE_PATH = "user://player_data.dat"
 const CUSTOM_MODES_DIR = "res://game_modes/"
 const DEFAULT_PORT = 9050
 const SERVER_PORT = 9050
-const ColorGOLD = Color(1.0, 0.84, 0.0)  # Золотой цвет для VIP
+const ColorGOLD = Color(1.0, 0.84, 0.0)
 
 # Переменные
 var multiplayer_peer = ENetMultiplayerPeer.new()
@@ -37,9 +37,8 @@ var player_data = {
     "player_id": ""
 }
 var available_maps = ["Dust", "ZeroWall"]
-var available_modes = []
+var available_modes = ["Deathmatch", "Team Deathmatch", "ZombieMode"]
 var custom_modes = []
-var server_list_data = []
 var saved_servers = []
 
 # Ноды интерфейса
@@ -48,7 +47,7 @@ var saved_servers = []
 @onready var balance_label = $TabContainer/Main/PlayerInfo/BalanceLabel
 @onready var vip_button = $TabContainer/Main/PlayerInfo/VIPButton
 @onready var vip_status_label = $TabContainer/Main/PlayerInfo/VIPStatusLabel
-@onready var server_list = $TabContainer/Join/ScrollContainer/ServerList
+@onready var join_server_list = $TabContainer/Join/ScrollContainer/ServerList
 @onready var server_name_edit = $TabContainer/Create/ServerConfig/NameEdit
 @onready var player_limit_slider = $TabContainer/Create/ServerConfig/PlayersLimitSlider
 @onready var player_limit_label = $TabContainer/Create/ServerConfig/PlayersLimitLabel
@@ -58,8 +57,6 @@ var saved_servers = []
 @onready var vip_dialog = $VIPDialog
 @onready var vip_price_label = $TabContainer/Main/PlayerInfo/VIPPrice
 @onready var purchase_button = $VIPDialog/PurchaseButton
-@onready var server_manager = $ServerManager
-@onready var host_status_label = $TabContainer/Join/HostStatusLabel
 @onready var ip_label = $TabContainer/Join/HBoxContainer/IPLabel
 @onready var copy_ip_button = $TabContainer/Join/HBoxContainer/CopyIPButton
 @onready var ip_edit = $TabContainer/Join/HBoxContainer/IPEdit
@@ -96,10 +93,7 @@ func _load_player_data():
         var file = FileAccess.open(SAVE_PATH, FileAccess.READ)
         var saved_data = file.get_var()
         if saved_data is Dictionary:
-            var old_id = player_data["player_id"]
             player_data = saved_data
-            if old_id != "":
-                player_data["player_id"] = old_id
         file.close()
 
 func _save_player_data():
@@ -220,12 +214,15 @@ func add_funds(amount: int):
 #region Сервер
 func _on_create_server_pressed():
     var server_name = server_name_edit.text.strip_edges()
+    if server_name == "":
+        server_name = "My Server"
+    
     var selected_map = map_option.get_item_text(map_option.selected)
     var selected_mode = mode_option.get_item_text(mode_option.selected)
     
     current_server_info = {
         "name": server_name,
-        "ip": "127.0.0.1",
+        "ip": "127.0.0.1",  # Will be updated
         "port": DEFAULT_PORT,
         "map": selected_map,
         "mode": selected_mode,
@@ -245,17 +242,24 @@ func _create_network_server():
         multiplayer.multiplayer_peer = multiplayer_peer
         is_server = true
         
+        # Get actual IP
         var ips = _get_local_ips()
         current_server_info["ip"] = ips[0] if ips.size() > 0 else "127.0.0.1"
         
+        # Update UI
         ip_label.text = "Server IP: %s:%d" % [current_server_info["ip"], current_server_info["port"]]
         ip_label.visible = true
         copy_ip_button.visible = true
         
-        show_status("Server '%s' created successfully!" % current_server_info["name"], Color.GREEN)
+        show_status("Сервер '%s' создан!" % current_server_info["name"], Color.GREEN)
+        
+        # Connect signals
+        multiplayer.peer_connected.connect(_on_player_connected)
+        multiplayer.peer_disconnected.connect(_on_player_disconnected)
+        
         _start_game()
     else:
-        show_status("Failed to create server (error %d)" % error, Color.RED)
+        show_status("Ошибка создания сервера: %d" % error, Color.RED)
 
 func _get_local_ips() -> Array:
     var ips = []
@@ -267,7 +271,15 @@ func _get_local_ips() -> Array:
 func _on_copy_ip_button_pressed():
     var ip_port = ip_label.text.replace("Server IP: ", "")
     DisplayServer.clipboard_set(ip_port)
-    show_status("IP copied to clipboard!", Color.WHITE)
+    show_status("IP скопирован в буфер!", Color.WHITE)
+
+func _on_player_connected(id: int):
+    print("Игрок подключился:", id)
+    current_server_info["players"].append(id)
+
+func _on_player_disconnected(id: int):
+    print("Игрок отключился:", id)
+    current_server_info["players"].erase(id)
 #endregion
 
 #region Подключение к серверу
@@ -281,15 +293,20 @@ func load_servers():
     update_server_list()
 
 func update_server_list():
+    # Clear existing items
     for child in join_server_list.get_children():
         child.queue_free()
     
+    # Add saved servers
     for server in saved_servers:
+        if not is_valid_server(server):
+            continue
+            
         var hbox = HBoxContainer.new()
         hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
         
         var btn = Button.new()
-        btn.text = "%s:%d - %s" % [server["ip"], server["port"], server.get("name", "Unnamed")]
+        btn.text = "%s - %s:%d" % [server.get("name", "Unnamed"), server["ip"], server["port"]]
         btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
         btn.pressed.connect(_connect_to_server.bind(server))
         
@@ -310,68 +327,58 @@ func _on_connect_button_pressed():
         var server_info = {
             "ip": ip,
             "port": port,
-            "map": current_server_info.get("map", "Dust"),
-            "mode": current_server_info.get("mode", "Deathmatch"),
-            "name": current_server_info.get("name", "Custom Server"),
-            "max_players": current_server_info.get("max_players", 8)
+            "name": "Custom Server",
+            "map": "Dust",
+            "mode": "Deathmatch",
+            "max_players": 8
         }
         _connect_to_server(server_info)
     else:
-        show_status("Invalid IP address", Color.RED)
+        show_status("Неверный IP адрес", Color.RED)
 
 func _connect_to_server(server: Dictionary):
-    print("Connecting to server:", server)
-    
-    # Проверяем и приводим типы
-    if not server.has("ip") or not server.has("port"):
-        show_status("Invalid server data: missing ip or port", Color.RED)
+    if not is_valid_server(server):
+        show_status("Неверные данные сервера", Color.RED)
         return
     
-    var ip: String = str(server["ip"])
-    var port: int = int(server["port"])
+    print("Подключаемся к серверу:", server)
     
-    if not ip.is_valid_ip_address():
-        show_status("Invalid IP address: " + ip, Color.RED)
-        return
-    
-    if port <= 0 or port > 65535:
-        show_status("Invalid port number: " + str(port), Color.RED)
-        return
-    
-    # Создаем подключение
+    # Create connection
     var peer = ENetMultiplayerPeer.new()
-    var error = peer.create_client(ip, port)
+    var error = peer.create_client(str(server["ip"]), int(server["port"]))
     
     if error == OK:
-        # Обновляем информацию о сервере
-        current_server_info = {
-            "ip": ip,
-            "port": port,
-            "map": str(server.get("map", "Dust")),
-            "mode": str(server.get("mode", "Deathmatch")),
-            "name": str(server.get("name", "Unnamed Server")),
-            "max_players": int(server.get("max_players", 8)),
-            "players": []
-        }
+        # Save server info exactly as received
+        current_server_info = server.duplicate(true)
         
-        # Добавляем в историю
-        if not _server_in_saved(ip, port):
-            saved_servers.append(current_server_info)
+        # Add to saved servers if not exists
+        var exists = false
+        for s in saved_servers:
+            if s["ip"] == server["ip"] and s["port"] == server["port"]:
+                exists = true
+                break
+        
+        if not exists:
+            saved_servers.append(server.duplicate(true))
             save_servers()
             update_server_list()
         
         multiplayer.multiplayer_peer = peer
         is_server = false
-        show_status("Connecting to %s..." % ip, Color.WHITE)
-        _start_game()
+        
+        # Connect signals
+        multiplayer.connection_failed.connect(_on_connection_failed)
+        multiplayer.connected_to_server.connect(_on_connected_to_server)
+        
+        show_status("Подключаемся к %s..." % server["ip"], Color.WHITE)
     else:
-        show_status("Connection failed with error: %d" % error, Color.RED)
+        show_status("Ошибка подключения: %d" % error, Color.RED)
 
-func _server_in_saved(ip: String, port: int) -> bool:
-    for server in saved_servers:
-        if str(server["ip"]) == ip and int(server["port"]) == port:
-            return true
-    return false
+func _on_connection_failed():
+    show_status("Не удалось подключиться к серверу", Color.RED)
+
+func _on_connected_to_server():
+    _start_game()
 
 func _remove_server(server: Dictionary):
     saved_servers.erase(server)
@@ -383,59 +390,34 @@ func save_servers():
     file.store_string(JSON.stringify(saved_servers))
     file.close()
 
-func _on_ip_edit_text_changed(new_text):
-    join_status_label.visible = false
-    ip_edit.modulate = Color.WHITE if new_text.is_valid_ip_address() else Color(1, 0.5, 0.5)
+func is_valid_server(server: Dictionary) -> bool:
+    return server.has("ip") and server.has("port") and str(server["ip"]).is_valid_ip_address() and int(server["port"]) > 0
 #endregion
 
 #region Игра
 func _start_game():
+    # Load game scene
     var game_scene = load(GAME_SCENE_PATH).instantiate()
-    game_scene.server_info = current_server_info
     
-    var map_path = MAPS.get(current_server_info["map"], "Dust")
-    if map_path == "" or not ResourceLoader.exists(map_path):
+    # Verify map exists
+    var map_path = MAPS.get(current_server_info.get("map", "Dust"), "")
+    if map_path == "":
         show_status("Ошибка: карта не найдена!", Color.RED)
         return
     
-    var map_scene = load(map_path).instantiate()
-    game_scene.add_child(map_scene)
+    # Pass server info
+    game_scene.server_info = current_server_info.duplicate(true)
     
-    _setup_game_mode(game_scene)
-    
+    # Switch to game scene
     get_tree().root.add_child(game_scene)
     get_tree().current_scene.queue_free()
     get_tree().current_scene = game_scene
     
+    # Initialize as host or client
     if is_server:
         game_scene.init_host(player_data)
     else:
         game_scene.init_client(player_data)
-
-func _setup_game_mode(game_scene):
-    match current_server_info["mode"]:
-        "Deathmatch":
-            game_scene.setup_deathmatch()
-        "Team Deathmatch":
-            game_scene.setup_team_deathmatch()
-        "ZombieMode":
-            game_scene.setup_zombie_mode()
-        _:
-            game_scene.setup_default_mode()
-
-func _on_player_connected(id: int):
-    print("Player connected:", id)
-    current_server_info["players"].append(id)
-    rpc_id(id, "receive_server_info", current_server_info)
-
-func _on_player_disconnected(id: int):
-    print("Player disconnected:", id)
-    current_server_info["players"].erase(id)
-
-@rpc("reliable")
-func receive_server_info(info: Dictionary):
-    current_server_info = info
-    print("Received server info:", info)
 #endregion
 
 #region Утилиты
@@ -443,17 +425,15 @@ func show_status(message: String, color: Color):
     status_label.text = message
     status_label.modulate = color
     status_label.visible = true
-    await get_tree().create_timer(3.0).timeout
-    status_label.visible = false
-
-func show_error(message: String):
-    show_status(message, Color.RED)
-
-func is_valid_server(server: Dictionary) -> bool:
-    var required = ["ip", "port", "map", "mode", "name"]
-    for key in required:
-        if not key in server:
-            printerr("Invalid server: missing key", key)
-            return false
-    return true
+    
+    if has_node("StatusTimer"):
+        $StatusTimer.queue_free()
+    
+    var timer = Timer.new()
+    timer.name = "StatusTimer"
+    timer.wait_time = 3.0
+    timer.one_shot = true
+    timer.timeout.connect(func(): status_label.visible = false)
+    add_child(timer)
+    timer.start()
 #endregion
